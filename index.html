@@ -1,197 +1,164 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Air Canvas 🎨</title>
-
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
-
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Air Canvas</title>
 <style>
-body {
-    margin: 0;
-    font-family: Arial, sans-serif;
-    text-align: center;
-    background: #101827;
-    color: white;
-}
-
-h1 {
-    color: #38bdf8;
-}
-
-.container {
-    position: relative;
-    width: 640px;
-    max-width: 95%;
-    margin: 20px auto;
-}
-
-video {
-    display: none;
-}
-
-canvas {
-    width: 100%;
-    background: black;
-    border: 3px solid #38bdf8;
-    border-radius: 12px;
-    transform: scaleX(-1);
-}
-
-button, input {
-    padding: 10px;
-    margin: 7px;
-    border-radius: 8px;
-    border: none;
-}
-
-button {
-    background: #38bdf8;
-    cursor: pointer;
-    font-weight: bold;
-}
-
-button:hover {
-    background: #0ea5e9;
-}
-
-#status {
-    color: #86efac;
-}
+  :root { --bg:#0f1724; --accent:#22d3ee; --ok:#4ade80; --text:#e8f1f8; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:radial-gradient(circle at 50% 0%, #1e3a5f, var(--bg)); color:var(--text);
+         font-family:system-ui, sans-serif; display:flex; flex-direction:column; align-items:center; padding:16px; }
+  h1 { margin:8px 0 4px; color:var(--accent); }
+  #status { color:var(--ok); min-height:1.4em; margin:6px 0 12px; text-align:center; }
+  #stage { position:relative; width:min(100%, 880px); aspect-ratio:4/3; border:3px solid var(--accent); border-radius:14px;
+           overflow:hidden; background:#000; box-shadow:0 0 24px rgba(34,211,238,.35); }
+  #stage video, #stage canvas { position:absolute; inset:0; width:100%; height:100%; }
+  #video, #hand, #draw { transform:scaleX(-1); }
+  #video { object-fit:cover; }
+  .bar { display:flex; flex-wrap:wrap; gap:10px; justify-content:center; align-items:center; margin-top:14px; }
+  button, select, input[type=color] { padding:10px 16px; border-radius:8px; border:0; background:#a5f3fc; color:#083344;
+           font-weight:600; cursor:pointer; font-size:15px; }
+  input[type=color] { padding:2px; width:48px; height:42px; }
+  button:hover { background:#67e8f9; }
+  label { display:flex; align-items:center; gap:6px; font-size:14px; }
 </style>
 </head>
-
 <body>
+  <h1>🎨 Air Canvas</h1>
+  <div>Draw in the air using your index finger!</div>
+  <div id="status">Press “Start Camera” to begin.</div>
 
-<h1>🎨 Air Canvas</h1>
-<p>Draw in the air using your index finger!</p>
+  <div id="stage">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="draw"></canvas>
+    <canvas id="hand"></canvas>
+  </div>
 
-<p id="status">Click Start Camera to begin.</p>
+  <div class="bar">
+    <button id="startBtn">Start Camera</button>
+    <button id="clearBtn">Clear Canvas</button>
+    <button id="saveBtn">Save PNG</button>
+    <label>Color <input type="color" id="color" value="#22d3ee"></label>
+    <label>Size <input type="range" id="size" min="2" max="20" value="6"></label>
+    <label>Shape
+      <select id="shape">
+        <option value="free">Freehand</option>
+        <option value="line">Line</option>
+        <option value="rect">Rectangle</option>
+        <option value="circle">Circle</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="showHand" checked> Show hand model</label>
+    <label><input type="checkbox" id="showVideo" checked> Show camera</label>
+  </div>
 
-<div class="container">
-    <video id="video" playsinline></video>
-    <canvas id="canvas" width="640" height="480"></canvas>
-</div>
-
-<button id="start">Start Camera</button>
-<button onclick="clearCanvas()">Clear Canvas</button>
-<button onclick="saveCanvas()">Save PNG</button>
-
-<br>
-
-<label>Brush Size:</label>
-<input type="range" id="brush" min="2" max="20" value="5">
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1675466862/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
 
 <script>
-const video = document.getElementById("video");
-const canvas = document.getElementById("canvas");
-const ctx = canvas.getContext("2d");
-const statusText = document.getElementById("status");
+const W = 960, H = 720;
+const video = document.getElementById('video');
+const drawC = document.getElementById('draw'), handC = document.getElementById('hand');
+const dctx = drawC.getContext('2d'), hctx = handC.getContext('2d');
+drawC.width = handC.width = W; drawC.height = handC.height = H;
+const statusEl = document.getElementById('status');
 
-let previousPoint = null;
-let camera = null;
-let hands = null;
+let prev = null;
+let anchor = null;
+let preview = null;
 let started = false;
 
-ctx.lineWidth = 5;
-ctx.lineCap = "round";
-ctx.strokeStyle = "#00ff88";
+const $ = id => document.getElementById(id);
+function setStatus(t){ statusEl.textContent = t; }
+function fingerUp(lm, tip, pip){ return lm[tip].y < lm[pip].y; }
 
-function clearCanvas() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    previousPoint = null;
+function drawShape(ctx, type, a, b){
+  ctx.beginPath();
+  if (type === 'line'){ ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); }
+  else if (type === 'rect'){ ctx.rect(a.x,a.y,b.x-a.x,b.y-a.y); }
+  else if (type === 'circle'){ const r = Math.hypot(b.x-a.x,b.y-a.y); ctx.arc(a.x,a.y,r,0,Math.PI*2); }
+  ctx.stroke();
 }
 
-function saveCanvas() {
-    const link = document.createElement("a");
-    link.download = "air-canvas.png";
-    link.href = canvas.toDataURL("image/png");
-    link.click();
+function styleCtx(ctx){
+  ctx.strokeStyle = $('color').value;
+  ctx.lineWidth = +$('size').value;
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
 }
 
-document.getElementById("brush").addEventListener("input", function() {
-    ctx.lineWidth = Number(this.value);
-});
+function onResults(res){
+  hctx.clearRect(0,0,W,H);
+  const lm = res.multiHandLandmarks && res.multiHandLandmarks[0];
+  if (!lm){ prev = null; finishShape(); return; }
 
-function onResults(results) {
-    if (!results.multiHandLandmarks ||
-        results.multiHandLandmarks.length === 0) {
-        previousPoint = null;
-        return;
-    }
+  if ($('showHand').checked){
+    drawConnectors(hctx, lm, HAND_CONNECTIONS, {color:'#4ade80', lineWidth:3});
+    drawLandmarks(hctx, lm, {color:'#f43f5e', lineWidth:1, radius:4});
+  }
 
-    const landmarks = results.multiHandLandmarks[0];
+  const tip = { x: lm[8].x * W, y: lm[8].y * H };
+  const indexUp  = fingerUp(lm, 8, 6);
+  const middleUp = fingerUp(lm, 12, 10);
+  const drawing = indexUp && !middleUp;
+  const shape = $('shape').value;
 
-    const indexTip = landmarks[8];
-    const indexMiddle = landmarks[6];
-    const middleTip = landmarks[12];
-    const middleMiddle = landmarks[10];
-
-    const indexUp = indexTip.y < indexMiddle.y;
-    const middleDown = middleTip.y > middleMiddle.y;
-
-    if (indexUp && middleDown) {
-        const x = (1 - indexTip.x) * canvas.width;
-        const y = indexTip.y * canvas.height;
-
-        if (previousPoint) {
-            ctx.beginPath();
-            ctx.moveTo(previousPoint.x, previousPoint.y);
-            ctx.lineTo(x, y);
-            ctx.stroke();
-        }
-
-        previousPoint = {x, y};
+  if (drawing){
+    styleCtx(dctx);
+    if (shape === 'free'){
+      if (prev){ dctx.beginPath(); dctx.moveTo(prev.x,prev.y); dctx.lineTo(tip.x,tip.y); dctx.stroke(); }
+      prev = tip;
     } else {
-        previousPoint = null;
+      if (!anchor) anchor = tip;
+      preview = tip;
+      styleCtx(hctx); drawShape(hctx, shape, anchor, preview);
     }
+    hctx.beginPath(); hctx.fillStyle = $('color').value; hctx.arc(tip.x,tip.y,8,0,Math.PI*2); hctx.fill();
+  } else {
+    prev = null;
+    finishShape();
+    hctx.beginPath(); hctx.strokeStyle = '#fff'; hctx.lineWidth = 2; hctx.arc(tip.x,tip.y,10,0,Math.PI*2); hctx.stroke();
+  }
 }
 
-document.getElementById("start").addEventListener("click", async function() {
-    if (started) return;
+function finishShape(){
+  if (anchor && preview){ styleCtx(dctx); drawShape(dctx, $('shape').value, anchor, preview); }
+  anchor = null; preview = null;
+}
 
-    try {
-        statusText.textContent = "Starting camera...";
+async function start(){
+  if (started) return;
+  try {
+    const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}` });
+    hands.setOptions({ maxNumHands:1, modelComplexity:1, minDetectionConfidence:0.6, minTrackingConfidence:0.6 });
+    hands.onResults(onResults);
 
-        hands = new Hands({
-            locateFile: (file) =>
-                `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
-        });
+    const cam = new Camera(video, {
+      onFrame: async () => { await hands.send({ image: video }); },
+      width: 640, height: 480
+    });
+    await cam.start();
+    started = true;
+    setStatus('Camera started! Raise your index finger to draw. Index + middle finger = pause.');
+  } catch (e){
+    setStatus('Could not start camera: ' + e.message + ' (allow camera permission and use https).');
+  }
+}
 
-        hands.setOptions({
-            maxNumHands: 1,
-            modelComplexity: 1,
-            minDetectionConfidence: 0.7,
-            minTrackingConfidence: 0.7
-        });
-
-        hands.onResults(onResults);
-
-        camera = new Camera(video, {
-            onFrame: async () => {
-                await hands.send({image: video});
-            },
-            width: 640,
-            height: 480
-        });
-
-        await camera.start();
-
-        started = true;
-        statusText.textContent =
-            "Camera started! Raise your index finger to draw.";
-
-    } catch (error) {
-        statusText.textContent =
-            "Camera error: " + error.message;
-        console.error(error);
-    }
-});
+$('startBtn').onclick = start;
+$('clearBtn').onclick = () => { dctx.clearRect(0,0,W,H); prev = anchor = preview = null; };
+$('showVideo').onchange = e => { video.style.visibility = e.target.checked ? 'visible' : 'hidden'; };
+$('saveBtn').onclick = () => {
+  const out = document.createElement('canvas'); out.width = W; out.height = H;
+  const o = out.getContext('2d');
+  o.translate(W,0); o.scale(-1,1);
+  if ($('showVideo').checked && video.videoWidth) o.drawImage(video,0,0,W,H);
+  else { o.fillStyle = '#000'; o.fillRect(0,0,W,H); }
+  o.drawImage(drawC,0,0);
+  const a = document.createElement('a');
+  a.download = 'air-canvas.png'; a.href = out.toDataURL('image/png'); a.click();
+};
 </script>
-
 </body>
 </html>
-
