@@ -10,9 +10,9 @@
   body { margin:0; min-height:100vh; background:radial-gradient(circle at 50% 0%, #1e3a5f, var(--bg)); color:var(--text);
          font-family:system-ui, sans-serif; display:flex; flex-direction:column; align-items:center; padding:16px; }
   h1 { margin:8px 0 4px; color:var(--accent); }
-  #status { color:var(--ok); min-height:1.4em; margin:6px 0 12px; text-align:center; }
+  #status { color:var(--ok); min-height:1.4em; margin:6px 0 12px; text-align:center; font-weight:600; }
   #stage { position:relative; width:min(100%, 880px); aspect-ratio:4/3; border:3px solid var(--accent); border-radius:14px;
-           overflow:hidden; background:#000; box-shadow:0 0 24px rgba(34,211,238,.35); }
+           overflow:hidden; background:#000; box-shadow:0 0 24px rgba(34,211,238,.35); touch-action:none; }
   #stage video, #stage canvas { position:absolute; inset:0; width:100%; height:100%; }
   #video, #hand, #draw { transform:scaleX(-1); }
   #video { object-fit:cover; }
@@ -59,28 +59,15 @@
 
 <script>
 const W = 960, H = 720;
-const video = document.getElementById('video');
-const drawC = document.getElementById('draw'), handC = document.getElementById('hand');
+const $ = id => document.getElementById(id);
+const video = $('video');
+const drawC = $('draw'), handC = $('hand');
 const dctx = drawC.getContext('2d'), hctx = handC.getContext('2d');
 drawC.width = handC.width = W; drawC.height = handC.height = H;
-const statusEl = document.getElementById('status');
 
-let prev = null;
-let anchor = null;
-let preview = null;
-let started = false;
+let prev = null, anchor = null, preview = null, started = false, smooth = null;
 
-const $ = id => document.getElementById(id);
-function setStatus(t){ statusEl.textContent = t; }
-function fingerUp(lm, tip, pip){ return lm[tip].y < lm[pip].y; }
-
-function drawShape(ctx, type, a, b){
-  ctx.beginPath();
-  if (type === 'line'){ ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); }
-  else if (type === 'rect'){ ctx.rect(a.x,a.y,b.x-a.x,b.y-a.y); }
-  else if (type === 'circle'){ const r = Math.hypot(b.x-a.x,b.y-a.y); ctx.arc(a.x,a.y,r,0,Math.PI*2); }
-  ctx.stroke();
-}
+function setStatus(t){ $('status').textContent = t; }
 
 function styleCtx(ctx){
   ctx.strokeStyle = $('color').value;
@@ -88,38 +75,12 @@ function styleCtx(ctx){
   ctx.lineCap = 'round'; ctx.lineJoin = 'round';
 }
 
-function onResults(res){
-  hctx.clearRect(0,0,W,H);
-  const lm = res.multiHandLandmarks && res.multiHandLandmarks[0];
-  if (!lm){ prev = null; finishShape(); return; }
-
-  if ($('showHand').checked){
-    drawConnectors(hctx, lm, HAND_CONNECTIONS, {color:'#4ade80', lineWidth:3});
-    drawLandmarks(hctx, lm, {color:'#f43f5e', lineWidth:1, radius:4});
-  }
-
-  const tip = { x: lm[8].x * W, y: lm[8].y * H };
-  const indexUp  = fingerUp(lm, 8, 6);
-  const middleUp = fingerUp(lm, 12, 10);
-  const drawing = indexUp && !middleUp;
-  const shape = $('shape').value;
-
-  if (drawing){
-    styleCtx(dctx);
-    if (shape === 'free'){
-      if (prev){ dctx.beginPath(); dctx.moveTo(prev.x,prev.y); dctx.lineTo(tip.x,tip.y); dctx.stroke(); }
-      prev = tip;
-    } else {
-      if (!anchor) anchor = tip;
-      preview = tip;
-      styleCtx(hctx); drawShape(hctx, shape, anchor, preview);
-    }
-    hctx.beginPath(); hctx.fillStyle = $('color').value; hctx.arc(tip.x,tip.y,8,0,Math.PI*2); hctx.fill();
-  } else {
-    prev = null;
-    finishShape();
-    hctx.beginPath(); hctx.strokeStyle = '#fff'; hctx.lineWidth = 2; hctx.arc(tip.x,tip.y,10,0,Math.PI*2); hctx.stroke();
-  }
+function drawShape(ctx, type, a, b){
+  ctx.beginPath();
+  if (type === 'line'){ ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); }
+  else if (type === 'rect'){ ctx.rect(a.x,a.y,b.x-a.x,b.y-a.y); }
+  else if (type === 'circle'){ ctx.arc(a.x,a.y,Math.hypot(b.x-a.x,b.y-a.y),0,Math.PI*2); }
+  ctx.stroke();
 }
 
 function finishShape(){
@@ -127,12 +88,58 @@ function finishShape(){
   anchor = null; preview = null;
 }
 
+// finger is "extended" if tip is farther from the wrist than the middle joint (works at any hand angle)
+const dist = (a,b) => Math.hypot(a.x-b.x, a.y-b.y);
+function extended(lm, tip, pip){ return dist(lm[0], lm[tip]) > dist(lm[0], lm[pip]) * 1.05; }
+
+function onResults(res){
+  hctx.clearRect(0,0,W,H);
+  const lm = res.multiHandLandmarks && res.multiHandLandmarks[0];
+  if (!lm){ prev = null; smooth = null; finishShape(); setStatus('No hand detected — show your hand to the camera'); return; }
+
+  if ($('showHand').checked){
+    drawConnectors(hctx, lm, HAND_CONNECTIONS, {color:'#4ade80', lineWidth:3});
+    drawLandmarks(hctx, lm, {color:'#f43f5e', lineWidth:1, radius:4});
+  }
+
+  // smooth fingertip
+  const raw = { x: lm[8].x * W, y: lm[8].y * H };
+  smooth = smooth ? { x: smooth.x*0.5 + raw.x*0.5, y: smooth.y*0.5 + raw.y*0.5 } : raw;
+  const tip = smooth;
+
+  const indexUp  = extended(lm, 8, 6);
+  const middleUp = extended(lm, 12, 10);
+  const drawing  = indexUp && !middleUp;
+  const shape = $('shape').value;
+
+  if (drawing){
+    setStatus('✏️ Drawing');
+    styleCtx(dctx);
+    if (shape === 'free'){
+      if (prev){ dctx.beginPath(); dctx.moveTo(prev.x,prev.y); dctx.lineTo(tip.x,tip.y); dctx.stroke(); }
+      prev = { x: tip.x, y: tip.y };
+    } else {
+      if (!anchor) anchor = { x: tip.x, y: tip.y };
+      preview = { x: tip.x, y: tip.y };
+      styleCtx(hctx); drawShape(hctx, shape, anchor, preview);
+    }
+    hctx.beginPath(); hctx.fillStyle = $('color').value; hctx.arc(tip.x,tip.y,8,0,Math.PI*2); hctx.fill();
+  } else {
+    setStatus(indexUp ? '⏸ Paused (index + middle up)' : '⏸ Paused — raise only your index finger to draw');
+    prev = null; finishShape();
+    hctx.beginPath(); hctx.strokeStyle = '#fff'; hctx.lineWidth = 2; hctx.arc(tip.x,tip.y,10,0,Math.PI*2); hctx.stroke();
+  }
+}
+
 async function start(){
   if (started) return;
+  if (typeof Hands === 'undefined'){ setStatus('❌ Hand model failed to load. Check your internet and refresh.'); return; }
   try {
+    setStatus('Loading hand model… (first time can take 10–20 seconds)');
     const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}` });
-    hands.setOptions({ maxNumHands:1, modelComplexity:1, minDetectionConfidence:0.6, minTrackingConfidence:0.6 });
+    hands.setOptions({ maxNumHands:1, modelComplexity:1, minDetectionConfidence:0.5, minTrackingConfidence:0.5 });
     hands.onResults(onResults);
+    await hands.initialize();
 
     const cam = new Camera(video, {
       onFrame: async () => { await hands.send({ image: video }); },
@@ -140,11 +147,27 @@ async function start(){
     });
     await cam.start();
     started = true;
-    setStatus('Camera started! Raise your index finger to draw. Index + middle finger = pause.');
+    setStatus('Camera started! Raise only your index finger to draw.');
   } catch (e){
-    setStatus('Could not start camera: ' + e.message + ' (allow camera permission and use https).');
+    setStatus('❌ Could not start: ' + e.message);
   }
 }
+
+// ---- Backup: draw with mouse / touch (mirrored canvas, so flip x) ----
+let mouseDown = false, mprev = null;
+function pointer(e){
+  const r = drawC.getBoundingClientRect();
+  const x = (1 - (e.clientX - r.left) / r.width) * W;   // flipped because canvas is mirrored
+  const y = (e.clientY - r.top) / r.height * H;
+  return { x, y };
+}
+$('stage').addEventListener('pointerdown', e => { mouseDown = true; mprev = pointer(e); });
+$('stage').addEventListener('pointermove', e => {
+  if (!mouseDown) return;
+  const p = pointer(e); styleCtx(dctx);
+  dctx.beginPath(); dctx.moveTo(mprev.x,mprev.y); dctx.lineTo(p.x,p.y); dctx.stroke(); mprev = p;
+});
+window.addEventListener('pointerup', () => { mouseDown = false; });
 
 $('startBtn').onclick = start;
 $('clearBtn').onclick = () => { dctx.clearRect(0,0,W,H); prev = anchor = preview = null; };
