@@ -53,28 +53,28 @@
     <label><input type="checkbox" id="showVideo" checked> Show camera</label>
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js" crossorigin="anonymous"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1675466862/drawing_utils.js" crossorigin="anonymous"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+<script type="module">
+import { HandLandmarker, FilesetResolver, DrawingUtils }
+  from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
 
-<script>
 const W = 960, H = 720;
 const $ = id => document.getElementById(id);
 const video = $('video');
 const drawC = $('draw'), handC = $('hand');
 const dctx = drawC.getContext('2d'), hctx = handC.getContext('2d');
 drawC.width = handC.width = W; drawC.height = handC.height = H;
+const utils = new DrawingUtils(hctx);
 
-let prev = null, anchor = null, preview = null, started = false, smooth = null;
+let landmarker = null, running = false;
+let prev = null, anchor = null, preview = null, smooth = null, lastTime = -1;
 
-function setStatus(t){ $('status').textContent = t; }
+const setStatus = t => { $('status').textContent = t; };
 
 function styleCtx(ctx){
   ctx.strokeStyle = $('color').value;
   ctx.lineWidth = +$('size').value;
   ctx.lineCap = 'round'; ctx.lineJoin = 'round';
 }
-
 function drawShape(ctx, type, a, b){
   ctx.beginPath();
   if (type === 'line'){ ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); }
@@ -82,27 +82,19 @@ function drawShape(ctx, type, a, b){
   else if (type === 'circle'){ ctx.arc(a.x,a.y,Math.hypot(b.x-a.x,b.y-a.y),0,Math.PI*2); }
   ctx.stroke();
 }
-
 function finishShape(){
   if (anchor && preview){ styleCtx(dctx); drawShape(dctx, $('shape').value, anchor, preview); }
   anchor = null; preview = null;
 }
 
-// finger is "extended" if tip is farther from the wrist than the middle joint (works at any hand angle)
 const dist = (a,b) => Math.hypot(a.x-b.x, a.y-b.y);
-function extended(lm, tip, pip){ return dist(lm[0], lm[tip]) > dist(lm[0], lm[pip]) * 1.05; }
+const extended = (lm, tip, pip) => dist(lm[0], lm[tip]) > dist(lm[0], lm[pip]) * 1.05;
 
-function onResults(res){
-  hctx.clearRect(0,0,W,H);
-  const lm = res.multiHandLandmarks && res.multiHandLandmarks[0];
-  if (!lm){ prev = null; smooth = null; finishShape(); setStatus('No hand detected — show your hand to the camera'); return; }
-
+function handleHand(lm){
   if ($('showHand').checked){
-    drawConnectors(hctx, lm, HAND_CONNECTIONS, {color:'#4ade80', lineWidth:3});
-    drawLandmarks(hctx, lm, {color:'#f43f5e', lineWidth:1, radius:4});
+    utils.drawConnectors(lm, HandLandmarker.HAND_CONNECTIONS, { color:'#4ade80', lineWidth:3 });
+    utils.drawLandmarks(lm, { color:'#f43f5e', radius:4 });
   }
-
-  // smooth fingertip
   const raw = { x: lm[8].x * W, y: lm[8].y * H };
   smooth = smooth ? { x: smooth.x*0.5 + raw.x*0.5, y: smooth.y*0.5 + raw.y*0.5 } : raw;
   const tip = smooth;
@@ -125,49 +117,78 @@ function onResults(res){
     }
     hctx.beginPath(); hctx.fillStyle = $('color').value; hctx.arc(tip.x,tip.y,8,0,Math.PI*2); hctx.fill();
   } else {
-    setStatus(indexUp ? '⏸ Paused (index + middle up)' : '⏸ Paused — raise only your index finger to draw');
+    setStatus(indexUp ? '⏸ Paused (index + middle up)' : '⏸ Hand found — raise only your index finger to draw');
     prev = null; finishShape();
     hctx.beginPath(); hctx.strokeStyle = '#fff'; hctx.lineWidth = 2; hctx.arc(tip.x,tip.y,10,0,Math.PI*2); hctx.stroke();
   }
 }
 
-async function start(){
-  if (started) return;
-  if (typeof Hands === 'undefined'){ setStatus('❌ Hand model failed to load. Check your internet and refresh.'); return; }
-  try {
-    setStatus('Loading hand model… (first time can take 10–20 seconds)');
-    const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}` });
-    hands.setOptions({ maxNumHands:1, modelComplexity:1, minDetectionConfidence:0.5, minTrackingConfidence:0.5 });
-    hands.onResults(onResults);
-    await hands.initialize();
+function loop(){
+  if (!running) return;
+  if (video.readyState >= 2 && video.currentTime !== lastTime){
+    lastTime = video.currentTime;
+    hctx.clearRect(0,0,W,H);
+    const res = landmarker.detectForVideo(video, performance.now());
+    if (res.landmarks && res.landmarks.length){
+      handleHand(res.landmarks[0]);
+    } else {
+      prev = null; smooth = null; finishShape();
+      setStatus('No hand detected — show your open palm to the camera');
+    }
+  }
+  requestAnimationFrame(loop);
+}
 
-    const cam = new Camera(video, {
-      onFrame: async () => { await hands.send({ image: video }); },
-      width: 640, height: 480
-    });
-    await cam.start();
-    started = true;
-    setStatus('Camera started! Raise only your index finger to draw.');
+async function createLandmarker(delegate){
+  const fileset = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  return HandLandmarker.createFromOptions(fileset, {
+    baseOptions: {
+      modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+      delegate
+    },
+    runningMode: "VIDEO",
+    numHands: 1,
+    minHandDetectionConfidence: 0.4,
+    minHandPresenceConfidence: 0.4,
+    minTrackingConfidence: 0.4
+  });
+}
+
+async function start(){
+  if (running) return;
+  try {
+    setStatus('1/3 Asking for camera permission…');
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
+    video.srcObject = stream;
+    await video.play();
+
+    setStatus('2/3 Loading hand model… (can take 10–30 seconds)');
+    try { landmarker = await createLandmarker("GPU"); }
+    catch (e){ console.warn('GPU failed, using CPU', e); landmarker = await createLandmarker("CPU"); }
+
+    setStatus('3/3 Ready! Show your hand.');
+    running = true;
+    loop();
   } catch (e){
-    setStatus('❌ Could not start: ' + e.message);
+    console.error(e);
+    setStatus('❌ ' + (e.name || 'Error') + ': ' + e.message);
   }
 }
 
-// ---- Backup: draw with mouse / touch (mirrored canvas, so flip x) ----
-let mouseDown = false, mprev = null;
-function pointer(e){
+// Backup: draw with mouse / touch
+let down = false, mprev = null;
+const pointer = e => {
   const r = drawC.getBoundingClientRect();
-  const x = (1 - (e.clientX - r.left) / r.width) * W;   // flipped because canvas is mirrored
-  const y = (e.clientY - r.top) / r.height * H;
-  return { x, y };
-}
-$('stage').addEventListener('pointerdown', e => { mouseDown = true; mprev = pointer(e); });
+  return { x: (1 - (e.clientX - r.left) / r.width) * W, y: (e.clientY - r.top) / r.height * H };
+};
+$('stage').addEventListener('pointerdown', e => { down = true; mprev = pointer(e); });
 $('stage').addEventListener('pointermove', e => {
-  if (!mouseDown) return;
+  if (!down) return;
   const p = pointer(e); styleCtx(dctx);
   dctx.beginPath(); dctx.moveTo(mprev.x,mprev.y); dctx.lineTo(p.x,p.y); dctx.stroke(); mprev = p;
 });
-window.addEventListener('pointerup', () => { mouseDown = false; });
+window.addEventListener('pointerup', () => { down = false; });
 
 $('startBtn').onclick = start;
 $('clearBtn').onclick = () => { dctx.clearRect(0,0,W,H); prev = anchor = preview = null; };
