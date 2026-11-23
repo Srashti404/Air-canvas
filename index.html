@@ -1,1 +1,197 @@
 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Air Canvas 🎨</title>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+<style>
+body {
+    margin: 0;
+    font-family: Arial, sans-serif;
+    text-align: center;
+    background: #101827;
+    color: white;
+}
+
+h1 {
+    color: #38bdf8;
+}
+
+.container {
+    position: relative;
+    width: 640px;
+    max-width: 95%;
+    margin: 20px auto;
+}
+
+video {
+    display: none;
+}
+
+canvas {
+    width: 100%;
+    background: black;
+    border: 3px solid #38bdf8;
+    border-radius: 12px;
+    transform: scaleX(-1);
+}
+
+button, input {
+    padding: 10px;
+    margin: 7px;
+    border-radius: 8px;
+    border: none;
+}
+
+button {
+    background: #38bdf8;
+    cursor: pointer;
+    font-weight: bold;
+}
+
+button:hover {
+    background: #0ea5e9;
+}
+
+#status {
+    color: #86efac;
+}
+</style>
+</head>
+
+<body>
+
+<h1>🎨 Air Canvas</h1>
+<p>Draw in the air using your index finger!</p>
+
+<p id="status">Click Start Camera to begin.</p>
+
+<div class="container">
+    <video id="video" playsinline></video>
+    <canvas id="canvas" width="640" height="480"></canvas>
+</div>
+
+<button id="start">Start Camera</button>
+<button onclick="clearCanvas()">Clear Canvas</button>
+<button onclick="saveCanvas()">Save PNG</button>
+
+<br>
+
+<label>Brush Size:</label>
+<input type="range" id="brush" min="2" max="20" value="5">
+
+<script>
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const statusText = document.getElementById("status");
+
+let previousPoint = null;
+let camera = null;
+let hands = null;
+let started = false;
+
+ctx.lineWidth = 5;
+ctx.lineCap = "round";
+ctx.strokeStyle = "#00ff88";
+
+function clearCanvas() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    previousPoint = null;
+}
+
+function saveCanvas() {
+    const link = document.createElement("a");
+    link.download = "air-canvas.png";
+    link.href = canvas.toDataURL("image/png");
+    link.click();
+}
+
+document.getElementById("brush").addEventListener("input", function() {
+    ctx.lineWidth = Number(this.value);
+});
+
+function onResults(results) {
+    if (!results.multiHandLandmarks ||
+        results.multiHandLandmarks.length === 0) {
+        previousPoint = null;
+        return;
+    }
+
+    const landmarks = results.multiHandLandmarks[0];
+
+    const indexTip = landmarks[8];
+    const indexMiddle = landmarks[6];
+    const middleTip = landmarks[12];
+    const middleMiddle = landmarks[10];
+
+    const indexUp = indexTip.y < indexMiddle.y;
+    const middleDown = middleTip.y > middleMiddle.y;
+
+    if (indexUp && middleDown) {
+        const x = (1 - indexTip.x) * canvas.width;
+        const y = indexTip.y * canvas.height;
+
+        if (previousPoint) {
+            ctx.beginPath();
+            ctx.moveTo(previousPoint.x, previousPoint.y);
+            ctx.lineTo(x, y);
+            ctx.stroke();
+        }
+
+        previousPoint = {x, y};
+    } else {
+        previousPoint = null;
+    }
+}
+
+document.getElementById("start").addEventListener("click", async function() {
+    if (started) return;
+
+    try {
+        statusText.textContent = "Starting camera...";
+
+        hands = new Hands({
+            locateFile: (file) =>
+                `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.7
+        });
+
+        hands.onResults(onResults);
+
+        camera = new Camera(video, {
+            onFrame: async () => {
+                await hands.send({image: video});
+            },
+            width: 640,
+            height: 480
+        });
+
+        await camera.start();
+
+        started = true;
+        statusText.textContent =
+            "Camera started! Raise your index finger to draw.";
+
+    } catch (error) {
+        statusText.textContent =
+            "Camera error: " + error.message;
+        console.error(error);
+    }
+});
+</script>
+
+</body>
+</html>
+
